@@ -1,0 +1,452 @@
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <HardwareSerial.h>
+#include <HTTPClient.h>
+#include <Update.h>
+
+// -----------------------------
+// Configuration Parameters#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <Update.h>
+#include <HardwareSerial.h>
+#include <Preferences.h>
+
+// Define virtual pins for Blynk
+#define vInSense V1
+#define vOutSense V2
+#define iInSense V3
+#define update V4
+
+// Blynk Auth Token
+char auth[] = "eIlMwM8qJ8XjMgWFKS-IxGTfPFFYbUFd";
+
+// WiFi credentials
+char ssid[] = "National-Infotech 4G";
+char pass[] = "Nitech4g";
+
+// Firmware update URL (Direct GitHub raw URL)
+const char* firmwareUrl = "https://raw.githubusercontent.com/Jay3770/ESP_OTA/main/firmware.bin";
+const char* versionUrl = "https://raw.githubusercontent.com/Jay3770/ESP_OTA/main/version.txt";
+
+// Time interval for checking updates (2 hours)
+const unsigned long updateInterval = 7200000;
+unsigned long previousMillis = 0;
+
+// LED pin
+const int ledPin = 2;
+
+// Define UART pins for ESP32
+#define UART_NUM 1
+#define TXD_PIN 17  // TX pin
+#define RXD_PIN 16  // RX pin
+#define BUFFER_SIZE 256  // Size of the buffer for received data
+
+// Define UART baud rate
+#define BAUD_RATE 115200
+
+// Create a HardwareSerial instance
+HardwareSerial mySerial(UART_NUM);
+
+char rxBuffer[BUFFER_SIZE];
+volatile int rxIndex = 0;
+volatile bool dataAvailable = false;
+
+// Flag to indicate update status
+bool updateApplied = false;
+
+// Preferences for storing firmware version
+Preferences preferences;
+
+// Function declarations
+void checkForUpdate();
+void toggleLED();
+void clearBlynkData();
+String getCurrentVersion();
+String getLatestVersion();
+
+// Blynk connected function
+BLYNK_CONNECTED() {
+    clearBlynkData();
+}
+
+// Interrupt Service Routine (ISR) to signal that data is ready to be read
+void IRAM_ATTR onReceive() {
+    dataAvailable = true;  // Set flag to indicate data is ready to be read
+}
+
+void setup() {
+    Serial.begin(115200);
+
+    pinMode(ledPin, OUTPUT);
+    digitalWrite(ledPin, LOW);
+
+    // Initialize HardwareSerial for communication with STM32G070
+    mySerial.begin(BAUD_RATE, SERIAL_8N1, RXD_PIN, TXD_PIN);
+
+    // Attach the interrupt to the serial receive
+    mySerial.onReceive(onReceive);
+
+    // Connect to WiFi
+    WiFi.begin(ssid, pass);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi connected");
+
+    // Initialize Blynk
+    Blynk.begin(auth, ssid, pass);
+
+    Serial.println("ESP32 Initialized and Connected to Blynk");
+
+    // Initialize Preferences
+    preferences.begin("firmware", false);
+
+    // Initial firmware check
+    checkForUpdate();
+}
+
+void loop() {
+    Blynk.run();
+
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousMillis >= updateInterval) {
+        previousMillis = currentMillis;
+        checkForUpdate();
+    }
+
+    toggleLED();
+
+    // Check if data is available in the serial buffer
+    if (dataAvailable) {
+        dataAvailable = false;  // Reset the flag before processing
+
+        while (mySerial.available()) {
+            char c = mySerial.read();
+            Serial.print(c);  // Debugging: Print each received character
+
+            if (c == '\n') {
+                rxBuffer[rxIndex] = '\0';  // Null-terminate the string
+                rxIndex = 0;  // Reset index for the next message
+
+                // Convert buffer to String and process it
+                String receivedData = String(rxBuffer);
+
+                // Print the received data for debugging
+                Serial.print("Received data: ");
+                Serial.println(receivedData);
+
+                // Split received data into parts and update Blynk
+                String dataParts[3];
+                int index = 0;
+                int lastIndex = 0;
+
+                for (int i = 0; i < receivedData.length(); i++) {
+                    if (receivedData[i] == ',' || i == receivedData.length() - 1) {
+                        if (i == receivedData.length() - 1 && receivedData[i] != ',') {
+                            i++;  // Include the last character if it's not a comma
+                        }
+                        dataParts[index++] = receivedData.substring(lastIndex, i);
+                        lastIndex = i + 1;
+                    }
+                }
+
+                // Print parsed data for debugging
+                for (int i = 0; i < index; i++) {
+                    Serial.print("Data part ");
+                    Serial.print(i);
+                    Serial.print(": ");
+                    Serial.println(dataParts[i]);
+                }
+
+                // Update Blynk virtual pins with validation
+                if (index > 0 && dataParts[0].length() > 0) Blynk.virtualWrite(vInSense, dataParts[0]);
+                if (index > 1 && dataParts[1].length() > 0) Blynk.virtualWrite(vOutSense, dataParts[1]);
+                if (index > 2 && dataParts[2].length() > 0) {
+                    float currentInAmps = dataParts[2].toFloat();
+                    float currentInMilliAmps = currentInAmps / 1000;
+                    Blynk.virtualWrite(iInSense, currentInMilliAmps);
+                }
+            } else {
+                if (rxIndex < BUFFER_SIZE - 1) {
+                    rxBuffer[rxIndex++] = c;
+                }
+            }
+        }
+    }
+
+    // Send request to STM32 to send data
+    mySerial.write(0x66);
+}
+
+void checkForUpdate() {
+    if (updateApplied) {
+        Serial.println("Update already applied. Skipping check.");
+        return;
+    }
+
+    String currentVersion = getCurrentVersion();
+    String latestVersion = getLatestVersion();
+
+    Serial.printf("Current Version: %s\n", currentVersion.c_str());
+    Serial.printf("Latest Version: %s\n", latestVersion.c_str());
+
+    if (latestVersion != currentVersion) {
+        Serial.println("New firmware available. Starting update...");
+
+        WiFiClientSecure client;
+        client.setInsecure(); // Bypass SSL validation
+
+        HTTPClient http;
+        http.begin(client, firmwareUrl);
+
+        int httpCode = http.GET();
+        Serial.printf("Initial HTTP GET code: %d\n", httpCode);
+
+        if (httpCode == 200) {
+            int firmwareSize = http.getSize();
+            Serial.printf("Firmware size: %d bytes\n", firmwareSize);
+            if (firmwareSize > 0) {
+                Serial.printf("Free heap before update: %d bytes\n", ESP.getFreeHeap());
+                WiFiClient* stream = http.getStreamPtr();
+                if (Update.begin(firmwareSize)) {
+                    size_t written = Update.writeStream(*stream);
+                    if (written == firmwareSize) {
+                        if (Update.end()) {
+                            Serial.println("Update complete. Rebooting...");
+                            Blynk.virtualWrite(update, 1);
+                            updateApplied = true;  // Set flag to indicate update has been applied
+                            preferences.putString("version", latestVersion);  // Store new version
+                            ESP.restart();
+                        } else {
+                            Serial.println("Update end failed");
+                            Serial.printf("Free heap after update: %d bytes\n", ESP.getFreeHeap());
+                        }
+                    } else {
+                        Serial.printf("Firmware update failed. Written: %d, Expected: %d\n", written, firmwareSize);
+                    }
+                } else {
+                    Serial.println("Not enough space for update");
+                    Serial.printf("Free heap before update attempt: %d bytes\n", ESP.getFreeHeap());
+                }
+            } else {
+                Serial.println("Firmware size is 0");
+            }
+        } else {
+            Serial.printf("HTTP GET failed: %s\n", http.errorToString(httpCode).c_str());
+        }
+    } else {
+        Serial.println("No new firmware available.");
+    }
+
+    Blynk.virtualWrite(update, 0);  // Indicate no new version
+}
+
+String getCurrentVersion() {
+    // Retrieve current version from non-volatile storage
+    return preferences.getString("version", "0.0.0");  // Default version "0.0.0" if not set
+}
+
+String getLatestVersion() {
+    // Fetch latest version from a URL
+    WiFiClient client;
+    HTTPClient http;
+    http.begin(client, versionUrl);
+
+    int httpCode = http.GET();
+    String version = "0.0.0";  // Default version
+
+    if (httpCode == 200) {
+        version = http.getString();  // Get version from the response
+    }
+
+    http.end();
+    return version;
+}
+
+void toggleLED() {
+    static unsigned long lastBlink = 0;
+    unsigned long currentMillis = millis();
+
+    if (currentMillis - lastBlink >= 1000) { // 1 second interval
+        lastBlink = currentMillis;
+        digitalWrite(ledPin, !digitalRead(ledPin));  // Toggle LED state
+    }
+}
+
+void clearBlynkData() {
+    Blynk.virtualWrite(vInSense, "0");
+    Blynk.virtualWrite(vOutSense, "0");
+    Blynk.virtualWrite(iInSense, "0");
+}
+
+// -----------------------------
+#define CURRENT_FIRMWARE_VERSION  "1.0"
+#define vInSense V1
+#define vOutSense V2
+#define iInSense V3
+char auth[] = "eIlMwM8qJ8XjMgWFKS-IxGTfPFFYbUFd";
+char ssid[] = "National-Infotech 4G";
+char pass[] = "Nitech4g";
+#define UART_NUM 1
+#define TXD_PIN 17
+#define RXD_PIN 16
+#define BUFFER_SIZE 256
+#define BAUD_RATE 115200
+const char* versionUrl = "https://www.dropbox.com/s/your_version_file_path/version.txt?dl=1";
+const char* firmwareUrl = "https://www.dropbox.com/s/your_firmware_file_path/firmware.bin?dl=1";
+const unsigned long updateInterval = 300000;
+unsigned long previousUpdateCheck = 0;
+const int ledPin = 2;
+
+HardwareSerial mySerial(UART_NUM);
+char rxBuffer[BUFFER_SIZE];
+volatile int rxIndex = 0;
+volatile bool dataAvailable = false;
+
+// Function Declarations
+void clearBlynkData();
+void checkForUpdates();
+void performOTAUpdate();
+void blinkLED();
+void processSTM32Data(String data);
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+    Serial.println("\nInitializing...");
+    pinMode(ledPin, OUTPUT);
+    digitalWrite(ledPin, LOW);
+    mySerial.begin(BAUD_RATE, SERIAL_8N1, RXD_PIN, TXD_PIN);
+    Serial.println("UART initialized.");
+    WiFi.begin(ssid, pass);
+    Serial.print("Connecting to WiFi");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi connected. IP address: " + WiFi.localIP().toString());
+    Blynk.begin(auth, ssid, pass);
+    Serial.println("Connected to Blynk.");
+    clearBlynkData();
+    Serial.println("Setup complete.");
+}
+
+void loop() {
+    Blynk.run();
+    blinkLED();
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousUpdateCheck >= updateInterval) {
+        previousUpdateCheck = currentMillis;
+        checkForUpdates();
+    }
+    mySerial.write(0x66);
+    Serial.println("Sent request to STM32: 0x66");
+    if (mySerial.available()) {
+        String receivedData = mySerial.readStringUntil('\n');
+        Serial.println("Received data from STM32: " + receivedData);
+        processSTM32Data(receivedData);
+    }
+    delay(1000);
+}
+
+void blinkLED() {
+    static unsigned long lastBlink = 0;
+    unsigned long currentMillis = millis();
+    if (currentMillis - lastBlink >= 1000) {
+        lastBlink = currentMillis;
+        digitalWrite(ledPin, !digitalRead(ledPin));
+    }
+}
+
+void clearBlynkData() {
+    Blynk.virtualWrite(vInSense, "0");
+    Blynk.virtualWrite(vOutSense, "0");
+    Blynk.virtualWrite(iInSense, "0");
+    Serial.println("Cleared Blynk data.");
+}
+
+void checkForUpdates() {
+    Serial.println("Checking for updates...");
+    HTTPClient http;
+    http.setTimeout(10000);
+    http.begin(versionUrl);
+    int httpCode = http.GET();
+    if (httpCode == 200) {
+        String newVersion = http.getString();
+        newVersion.trim();
+        Serial.println("Current Firmware Version: " + String(CURRENT_FIRMWARE_VERSION));
+        Serial.println("Available Firmware Version: " + newVersion);
+        if (newVersion.equals(CURRENT_FIRMWARE_VERSION)) {
+            Serial.println("Firmware is up to date.");
+        } else {
+            Serial.println("New firmware available. Starting OTA update...");
+            performOTAUpdate();
+        }
+    } else {
+        Serial.println("Failed to fetch version file. HTTP Code: " + String(httpCode));
+    }
+    http.end();
+}
+
+void performOTAUpdate() {
+    HTTPClient http;
+    http.setTimeout(20000);
+    http.begin(firmwareUrl);
+    int httpCode = http.GET();
+    if (httpCode == 200) {
+        int contentLength = http.getSize();
+        WiFiClient* stream = http.getStreamPtr();
+        if (Update.begin(contentLength)) {
+            Serial.println("Starting firmware update...");
+            size_t written = Update.writeStream(*stream);
+            if (written == contentLength) {
+                Serial.println("Firmware written successfully. Finalizing update...");
+                if (Update.end()) {
+                    Serial.println("Update completed successfully. Rebooting...");
+                    delay(1000);
+                    ESP.restart();
+                } else {
+                    Serial.println("Update failed. Error: " + String(Update.getError()));
+                }
+            } else {
+                Serial.println("Written only " + String(written) + " / " + String(contentLength) + " bytes. Update failed.");
+            }
+        } else {
+            Serial.println("Not enough space for update.");
+        }
+    } else {
+        Serial.println("Failed to download firmware. HTTP Code: " + String(httpCode));
+    }
+    http.end();
+}
+
+void processSTM32Data(String data) {
+    data.trim();
+    if (data.length() == 0) {
+        Serial.println("No data received from STM32.");
+        return;
+    }
+    String dataParts[3];
+    int index = 0;
+    int start = 0;
+    int end = data.indexOf(',');
+    while (end != -1) {
+        dataParts[index++] = data.substring(start, end);
+        start = end + 1;
+        end = data.indexOf(',', start);
+    }
+    dataParts[index++] = data.substring(start);
+    for (int i = 0; i < index; i++) {
+        Serial.println("Data part " + String(i) + ": " + dataParts[i]);
+    }
+    if (index > 0) Blynk.virtualWrite(vInSense, dataParts[0]);
+    if (index > 1) Blynk.virtualWrite(vOutSense, dataParts[1]);
+    if (index > 2) {
+        float currentInAmps = dataParts[2].toFloat();
+        float currentInMilliAmps = currentInAmps * 1000;
+        Blynk.virtualWrite(iInSense, currentInMilliAmps);
+    }
+}
