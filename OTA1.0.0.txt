@@ -198,6 +198,7 @@ void checkForUpdate() {
         Serial.println("New firmware available. Starting update...");
 
         WiFiClientSecure client;
+        client.setTimeout(5000);  // Set a 5-second timeout for the request
         client.setInsecure(); // Bypass SSL validation
 
         HTTPClient http;
@@ -235,6 +236,8 @@ void checkForUpdate() {
         } else {
             Serial.printf("HTTP GET failed: %s\n", http.errorToString(httpCode).c_str());
         }
+
+        http.end();  // Close the connection
     } else {
         Serial.println("No new firmware available.");
     }
