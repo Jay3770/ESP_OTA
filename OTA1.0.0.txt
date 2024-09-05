@@ -25,8 +25,11 @@ const char* versionUrl = "https://raw.githubusercontent.com/Jay3770/ESP_OTA/main
 
 // Time interval for checking updates (2 hours)
 const unsigned long updateInterval = 7200000;
-// const unsigned long updateInterval = 900000;  // 15 minutes
-unsigned long previousMillis = 0;
+unsigned long previousUpdateMillis = 0;
+
+// UART communication timing
+unsigned long previousUARTMillis = 0;
+const unsigned long uartInterval = 500;  // Send command every 500ms
 
 // LED pin
 const int ledPin = 2;
@@ -71,7 +74,7 @@ void setup() {
     pinMode(ledPin, OUTPUT);
     digitalWrite(ledPin, LOW);
 
-    // Initialize HardwareSerial for communication with STM32G070
+    // Initialize HardwareSerial for communication with STM32
     mySerial.begin(BAUD_RATE, SERIAL_8N1, RXD_PIN, TXD_PIN);
 
     // Connect to WiFi
@@ -98,20 +101,20 @@ void loop() {
     Blynk.run();
 
     unsigned long currentMillis = millis();
-    if (currentMillis - previousMillis >= updateInterval) {
-        previousMillis = currentMillis;
+
+    // Check for firmware update every updateInterval
+    if (currentMillis - previousUpdateMillis >= updateInterval) {
+        previousUpdateMillis = currentMillis;
         checkForUpdate();
     }
 
-    toggleLED();
-
-    // UART communication with STM32
-    if (currentMillis - previousMillis >= 500) { // Send command every 500ms
-        previousMillis = currentMillis;
+    // UART communication with STM32 every uartInterval
+    if (currentMillis - previousUARTMillis >= uartInterval) {
+        previousUARTMillis = currentMillis;
         mySerial.write(0x66); // Send request to STM32
     }
 
-    // Check if data is available in the serial buffer
+    // Process incoming UART data
     while (mySerial.available()) {
         char c = mySerial.read();
         Serial.print(c);  // Debugging: Print each received character
@@ -163,7 +166,7 @@ void loop() {
             }
             if (index > 2 && dataParts[2].length() > 0) {
                 float currentInAmps = dataParts[2].toFloat();
-                float currentInMilliAmps = currentInAmps / 1000;
+                float currentInMilliAmps = currentInAmps * 1000;  // Convert to milliamps
                 Blynk.virtualWrite(iInSense, currentInMilliAmps);
                 Serial.print("iInSense updated: ");
                 Serial.println(currentInMilliAmps);
@@ -174,6 +177,9 @@ void loop() {
             }
         }
     }
+
+    // LED toggle function to indicate code is running
+    toggleLED();
 }
 
 void checkForUpdate() {
@@ -204,27 +210,24 @@ void checkForUpdate() {
             int firmwareSize = http.getSize();
             Serial.printf("Firmware size: %d bytes\n", firmwareSize);
             if (firmwareSize > 0) {
-                Serial.printf("Free heap before update: %d bytes\n", ESP.getFreeHeap());
                 WiFiClient* stream = http.getStreamPtr();
                 if (Update.begin(firmwareSize)) {
                     size_t written = Update.writeStream(*stream);
                     if (written == firmwareSize) {
                         if (Update.end()) {
                             Serial.println("Update complete. Rebooting...");
-                            Blynk.virtualWrite(update, 1);
+                            Blynk.virtualWrite(update, 1);  // Indicate update success
                             updateApplied = true;  // Set flag to indicate update has been applied
                             preferences.putString("version", latestVersion);  // Store new version
                             ESP.restart();
                         } else {
                             Serial.println("Update end failed");
-                            Serial.printf("Free heap after update: %d bytes\n", ESP.getFreeHeap());
                         }
                     } else {
                         Serial.printf("Firmware update failed. Written: %d, Expected: %d\n", written, firmwareSize);
                     }
                 } else {
                     Serial.println("Not enough space for update");
-                    Serial.printf("Free heap before update attempt: %d bytes\n", ESP.getFreeHeap());
                 }
             } else {
                 Serial.println("Firmware size is 0");
@@ -253,7 +256,7 @@ String getLatestVersion() {
     int httpCode = http.GET();
     if (httpCode == 200) {
         String version = http.getString();
-        version.trim();
+        version.trim();  // Remove any extra spaces or newlines
         return version;
     } else {
         Serial.printf("Failed to get latest version: %s\n", http.errorToString(httpCode).c_str());
@@ -264,7 +267,7 @@ String getLatestVersion() {
 void toggleLED() {
     static unsigned long lastToggleTime = 0;
     unsigned long currentMillis = millis();
-    if (currentMillis - lastToggleTime >= 1000) {
+    if (currentMillis - lastToggleTime >= 1000) {  // Toggle every 1 second
         lastToggleTime = currentMillis;
         digitalWrite(ledPin, !digitalRead(ledPin));
     }
@@ -274,5 +277,5 @@ void clearBlynkData() {
     Blynk.virtualWrite(vInSense, "0");
     Blynk.virtualWrite(vOutSense, "0");
     Blynk.virtualWrite(iInSense, "0");
-    Blynk.virtualWrite(update, "0");
+    Blynk.virtualWrite(update, 0);
 }
