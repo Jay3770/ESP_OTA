@@ -24,7 +24,8 @@ const char* firmwareUrl = "https://raw.githubusercontent.com/Jay3770/ESP_OTA/mai
 const char* versionUrl = "https://raw.githubusercontent.com/Jay3770/ESP_OTA/main/OTA1.0.0.txt";
 
 // Time interval for checking updates (2 hours)
-const unsigned long updateInterval = 7200000;
+// const unsigned long updateInterval = 7200000;
+const unsigned long updateInterval = 900000;
 unsigned long previousUpdateMillis = 0;
 
 // UART communication timing
@@ -166,7 +167,7 @@ void loop() {
             }
             if (index > 2 && dataParts[2].length() > 0) {
                 float currentInAmps = dataParts[2].toFloat();
-                float currentInMilliAmps = currentInAmps * 1000;  // Convert to milliamps
+                float currentInMilliAmps = currentInAmps / 100;  // Convert to milliamps
                 Blynk.virtualWrite(iInSense, currentInMilliAmps);
                 Serial.print("iInSense updated: ");
                 Serial.println(currentInMilliAmps);
